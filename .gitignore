@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.env
+venv/
+.venv/
+env/
+
+# Logs
+logs/*.log
+
+# Data files (don't push actual sensor data)
+data/*.csv
+quarantine/*.csv
+
+# Database
+*.db
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

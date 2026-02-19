@@ -27,3 +27,5 @@ Thumbs.db
 
 # Excluding the original dataset
 sample_data/iot_telemetry_data.csv
+
+.env

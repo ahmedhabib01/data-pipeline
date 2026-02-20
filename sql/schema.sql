@@ -1,7 +1,3 @@
--- ============================================
--- Real-Time Sensor Data Pipeline - DB Schema
--- ============================================
-
 -- Table 1: Raw sensor readings (every valid incoming row)
 CREATE TABLE IF NOT EXISTS raw_sensor_data (
     id              SERIAL PRIMARY KEY,

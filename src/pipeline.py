@@ -10,7 +10,7 @@ from src.aggregator import aggregate
 from src.db_handler import insert_raw_data, insert_aggregated_metrics, log_quarantine
 from src.file_watcher import FileWatcher
 
-# ── Logging Setup ─────────────────────────────────────────
+# Logging Setup
 os.makedirs(LOG_DIR, exist_ok=True)
 os.makedirs(QUARANTINE_DIR, exist_ok=True)
 
@@ -43,7 +43,7 @@ def process_file(filepath: str):
     logger.info(f"{'='*50}")
     logger.info(f"Processing file: {filename}")
 
-    # ── Step 1: Read CSV ──────────────────────────────────
+    # Step 1: Read CSV 
     try:
         df = pd.read_csv(filepath)
         logger.info(f"[{filename}] Loaded {len(df)} rows")
@@ -52,14 +52,14 @@ def process_file(filepath: str):
         _quarantine_file(filepath, filename, f"Failed to read CSV: {e}")
         return
 
-    # ── Step 2: Validate ──────────────────────────────────
+    # Step 2: Validate
     is_valid, reason = validate(df, filename)
     if not is_valid:
         logger.warning(f"[{filename}] Validation failed: {reason}")
         _quarantine_file(filepath, filename, reason)
         return
 
-    # ── Step 3: Transform ─────────────────────────────────
+    # Step 3: Transform 
     try:
         df = transform(df, filename)
     except Exception as e:
@@ -67,7 +67,7 @@ def process_file(filepath: str):
         _quarantine_file(filepath, filename, f"Transformation error: {e}")
         return
 
-    # ── Step 4: Aggregate ─────────────────────────────────
+    # Step 4: Aggregate
     try:
         agg_df = aggregate(df, filename)
     except Exception as e:
@@ -75,7 +75,7 @@ def process_file(filepath: str):
         _quarantine_file(filepath, filename, f"Aggregation error: {e}")
         return
 
-    # ── Step 5: Store in DB ───────────────────────────────
+    # Step 5: Store in DB 
     try:
         insert_raw_data(df, filename)
         insert_aggregated_metrics(agg_df, filename)

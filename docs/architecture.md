@@ -47,92 +47,97 @@ and handles failures gracefully.
 ## Components
 
 ### 1. File Watcher (`src/file_watcher.py`)
-Continuously scans the `data/` folder every 5 seconds for new CSV files. When a 
-new file is detected it triggers the pipeline immediately. Already processed files 
-are tracked in memory to avoid duplicate processing.
+This is basically the starting point of everything. It just sits there and checks 
+the `data/` folder every 5 seconds. If it sees a CSV file it hasn't seen before, 
+it passes it to the pipeline. I'm keeping track of already processed files in a 
+simple set so the same file doesn't get processed twice.
 
 ### 2. Validator (`src/validator.py`)
-Runs four checks on every incoming file:
-- **Column check** — ensures all required columns are present
-- **Null check** — rejects files with missing values in key fields
-- **Type check** — ensures numeric columns contain numeric data
-- **Range check** — ensures sensor readings fall within acceptable ranges
+Before doing anything with a file, I check if the data is actually usable. Four 
+things get checked:
+- are all the columns there that we expect?
+- are there any empty/null values in important columns?
+- are the numeric columns actually numbers?
+- are the sensor readings within a realistic range? (e.g. temperature shouldn't 
+be 9000°C)
 
-Files that fail any check are moved to `quarantine/` with a detailed reason logged.
+If any of these fail, the file gets moved to quarantine and we log exactly why 
+it failed. No guessing later.
 
 ### 3. Transformer (`src/transformer.py`)
-Prepares validated data for storage:
-- Converts Unix timestamps to human-readable datetime
-- Renames columns to match the database schema
-- Casts columns to correct data types
-- Applies min-max normalization to numeric sensor readings
-- Tags each row with the source filename and ingestion timestamp
+Once the data passes validation, this cleans it up and gets it ready for the 
+database. The timestamps in the raw data are Unix format (just a big number) so 
+I convert those to actual readable datetimes. Column names get renamed to match 
+the DB schema, data types get cast properly, and I run a min-max normalization 
+on the numeric readings so everything is on the same scale. Each row also gets 
+tagged with the filename it came from and when it was processed.
 
 ### 4. Aggregator (`src/aggregator.py`)
-After transformation, computes per-device metrics for each numeric column:
-- Minimum, maximum, average, and standard deviation
-- Groups by `device_id` so each device gets its own metric record
-- Tags results with source file and aggregation timestamp
+After transformation this calculates some basic stats for each sensor device — 
+min, max, average, and standard deviation for each numeric column. So if there 
+are 3 devices in the file, we get a separate stats row for each device for each 
+metric. These go into their own table in the DB so you can query them without 
+touching the raw data.
 
 ### 5. DB Handler (`src/db_handler.py`)
-Manages all database interactions:
-- Inserts raw transformed rows into `raw_sensor_data` table
-- Inserts computed metrics into `aggregated_metrics` table
-- Logs rejected files into `quarantine_log` table
-- Implements retry logic — retries up to 3 times on failure with a 5 second delay
+Everything that talks to the database goes through here. Raw rows go into 
+`raw_sensor_data`, aggregated stats go into `aggregated_metrics`, and rejected 
+files get logged in `quarantine_log`. I added a retry mechanism here too — if 
+the DB is down or something goes wrong, it tries again up to 3 times with a 
+5 second wait between attempts before finally giving up.
 
 ### 6. Pipeline Orchestrator (`src/pipeline.py`)
-The main entry point that wires all components together. It:
-- Sets up logging to both console and daily log files
-- Starts the file watcher
-- Passes each detected file through the full pipeline
-- Handles errors at every stage without crashing the entire process
+This is the main file that runs everything. It starts the watcher, and for each 
+new file detected it runs through all the steps above in order. If anything breaks 
+at any stage the error gets logged and the pipeline just moves on to the next file 
+rather than crashing completely. Logs go to both the terminal and a file in `logs/` 
+so you can check what happened after the fact.
 
 ---
 
 ## Database Schema
 
 ### `raw_sensor_data`
-Stores every valid incoming sensor reading with metadata tags.
+Every valid sensor reading ends up here, one row per reading.
 
 | Column | Type | Description |
 |---|---|---|
 | id | SERIAL | Primary key |
-| device_id | VARCHAR | Sensor device identifier |
-| timestamp | TIMESTAMP | Reading timestamp |
+| device_id | VARCHAR | Which sensor sent this |
+| timestamp | TIMESTAMP | When the reading was taken |
 | co | FLOAT | Carbon monoxide level |
 | humidity | FLOAT | Humidity percentage |
-| light | BOOLEAN | Light sensor state |
+| light | BOOLEAN | Was the light on or off |
 | lpg | FLOAT | LPG gas level |
-| motion | BOOLEAN | Motion detected |
+| motion | BOOLEAN | Was motion detected |
 | smoke | FLOAT | Smoke level |
 | temp | FLOAT | Temperature in Celsius |
-| source_file | VARCHAR | Origin CSV filename |
-| ingested_at | TIMESTAMP | When it was processed |
+| source_file | VARCHAR | Which CSV file this came from |
+| ingested_at | TIMESTAMP | When our pipeline processed it |
 
 ### `aggregated_metrics`
-Stores computed statistics per device per file.
+Stats per device per file. One row per metric per device.
 
 | Column | Type | Description |
 |---|---|---|
 | id | SERIAL | Primary key |
-| source_file | VARCHAR | Origin CSV filename |
-| device_id | VARCHAR | Sensor device identifier |
+| source_file | VARCHAR | Which file these stats are from |
+| device_id | VARCHAR | Which sensor device |
 | metric_name | VARCHAR | e.g. temp, humidity, co |
-| min_value | FLOAT | Minimum reading |
-| max_value | FLOAT | Maximum reading |
-| avg_value | FLOAT | Average reading |
-| std_value | FLOAT | Standard deviation |
-| record_count | INTEGER | Number of rows aggregated |
-| aggregated_at | TIMESTAMP | When aggregation ran |
+| min_value | FLOAT | Lowest reading in the file |
+| max_value | FLOAT | Highest reading in the file |
+| avg_value | FLOAT | Average across all readings |
+| std_value | FLOAT | How much the readings varied |
+| record_count | INTEGER | How many rows were in the file |
+| aggregated_at | TIMESTAMP | When this was calculated |
 
 ### `quarantine_log`
-Tracks every rejected file and the reason for rejection.
+Any file that got rejected gets an entry here with the reason.
 
 | Column | Type | Description |
 |---|---|---|
 | id | SERIAL | Primary key |
-| source_file | VARCHAR | Rejected filename |
+| source_file | VARCHAR | The file that was rejected |
 | error_reason | TEXT | Why it was rejected |
 | failed_at | TIMESTAMP | When it was rejected |
 
@@ -140,8 +145,8 @@ Tracks every rejected file and the reason for rejection.
 
 ## Fault Tolerance
 
-- Every stage is wrapped in try/except — a failure in one file does not stop the pipeline
-- Failed DB inserts are retried up to 3 times before giving up
-- All errors are written to dated log files in `logs/`
-- Rejected files are physically moved to `quarantine/` for manual inspection
-- The file watcher recovers from unexpected errors and continues scanning
+I tried to make sure one bad file doesn't bring everything down. Each stage has 
+its own error handling so if something goes wrong we log it and move on. The DB 
+retries a few times before giving up in case it's just a temporary connection 
+issue. Bad files get physically moved to quarantine so nothing gets silently 
+ignored — you can always go back and look at what failed and why.

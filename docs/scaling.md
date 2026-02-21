@@ -1,167 +1,46 @@
-# Scaling the Pipeline for Production
+# Scaling the Pipeline
 
-## Current State
+Right now the pipeline runs on a single machine and processes files one at a time 
+which is fine for small volumes but won't work if we're dealing with millions of 
+files a day. Here's how I'd think about scaling it horizontally.
 
-The current pipeline is designed for a single-node environment — it watches one 
-folder, processes files sequentially, and writes to a single PostgreSQL instance. 
-This works well for moderate data volumes but would need significant changes to 
-handle millions of files per day in a production environment.
+## The Main Idea
 
----
+Horizontal scaling means adding more machines to share the load instead of 
+upgrading one big server. For this pipeline that means splitting the work across 
+multiple nodes — one group of machines handles ingestion, another handles 
+processing, another handles storage.
 
-## Bottlenecks at Scale
+## Ingestion Layer
 
-| Bottleneck | Problem |
-|---|---|
-| Single folder watcher | Can only monitor one directory on one machine |
-| Sequential file processing | Files are processed one at a time |
-| Single DB instance | One PostgreSQL node becomes a write bottleneck |
-| No partitioning | Large tables slow down queries over time |
-| In-memory file tracking | Processed files list is lost on restart |
+Instead of watching a single folder, I'd replace the file watcher with Apache Kafka. 
+Data sources publish messages to Kafka topics and multiple consumer instances can 
+read and process them in parallel across different machines. If one consumer goes 
+down Kafka holds the messages until it recovers so nothing gets lost.
 
----
+Google Cloud Pub/Sub is a managed alternative if we want to avoid running Kafka 
+ourselves.
 
-## Proposed Scaled Architecture
-```
-+------------------+     +------------------+     +---------------------+
-|                  |     |                  |     |                     |
-|   IoT Devices /  | --> |   Apache Kafka   | --> |   Apache Spark      |
-|   Data Sources   |     |   (Message Queue)|     |   (Stream Processing|
-|                  |     |                  |     |    Cluster)         |
-+------------------+     +--------+---------+     +----------+----------+
-                                  |                          |
-                         +--------v---------+      +---------v----------+
-                         |                  |      |                    |
-                         |   Kafka Topics   |      |  Validation &      |
-                         |  (partitioned    |      |  Transformation    |
-                         |   by device)     |      |  (distributed)     |
-                         |                  |      |                    |
-                         +------------------+      +---------+----------+
-                                                             |
-                                              +--------------+-----------+
-                                              |                          |
-                                   +----------v---------+   +-----------v--------+
-                                   |                    |   |                    |
-                                   |  PostgreSQL with   |   |   Data Warehouse   |
-                                   |  Read Replicas     |   |   (Redshift /      |
-                                   |                    |   |    BigQuery)       |
-                                   +--------------------+   +--------------------+
-```
+## Processing Layer
 
----
+The pandas-based processing would be replaced with Apache Spark running in 
+cluster mode. Spark splits the data across worker nodes and processes chunks 
+in parallel. Validation, transformation and aggregation all happen distributedly 
+instead of sequentially.
 
-## Key Technologies for Scaling
+For lighter workloads AWS Lambda functions could handle individual file processing 
+and scale automatically based on how many files are coming in.
 
-### 1. Apache Kafka — Message Queue
-Instead of watching a folder, data sources publish messages to Kafka topics.
+## Storage Layer
 
-- Each IoT device or data source publishes to its own Kafka topic
-- Kafka retains messages even if consumers are down — no data loss
-- Multiple consumers can read from the same topic in parallel
-- Handles millions of events per second with ease
-- Built-in fault tolerance with message replication across brokers
+The single PostgreSQL instance would need read replicas to handle more queries 
+and table partitioning by date so the database doesn't slow down as data grows. 
+For analytics specifically something like Amazon Redshift or BigQuery would be 
+better suited than PostgreSQL.
 
-**Why Kafka over a folder watcher?**
-A folder watcher is a single point of failure and doesn't scale horizontally. 
-Kafka decouples producers from consumers and allows the pipeline to scale 
-each part independently.
+## Optimizations
 
----
-
-### 2. Apache Spark — Distributed Processing
-Replace the single-threaded pandas pipeline with Spark Structured Streaming.
-
-- Processes data in parallel across a cluster of machines
-- Can read directly from Kafka topics as a stream
-- Handles validation, transformation, and aggregation at massive scale
-- Fault tolerant — automatically recovers failed tasks on other nodes
-- Can process both real-time streams and large historical batches
-
-**Example Spark Streaming job:**
-```python
-df = spark \
-    .readStream \
-    .format("kafka") \
-    .option("kafka.bootstrap.servers", "kafka:9092") \
-    .option("subscribe", "sensor-data") \
-    .load()
-```
-
----
-
-### 3. Cloud-Based Alternatives
-
-If managing Kafka and Spark clusters is too complex, cloud services offer 
-managed equivalents:
-
-| Component | AWS | Google Cloud | Azure |
-|---|---|---|---|
-| Message Queue | AWS Kinesis | Cloud Pub/Sub | Event Hubs |
-| Stream Processing | AWS Lambda | Dataflow | Stream Analytics |
-| Data Warehouse | Redshift | BigQuery | Synapse Analytics |
-| Object Storage | S3 | Cloud Storage | Blob Storage |
-
-**Recommended cloud stack for this pipeline:**
-- **AWS Kinesis** to replace the folder watcher and Kafka
-- **AWS Lambda** for lightweight validation and transformation
-- **AWS Glue** for heavy ETL and aggregation jobs
-- **Amazon RDS (PostgreSQL)** with read replicas for storage
-- **Amazon Redshift** for analytical queries on aggregated data
-
----
-
-### 4. Database Scaling
-
-The current single PostgreSQL instance would need these changes at scale:
-
-- **Table partitioning** — partition `raw_sensor_data` by month so queries 
-  don't scan the entire table
-- **Read replicas** — offload analytical queries to replica nodes
-- **Connection pooling** — use PgBouncer to manage thousands of concurrent 
-  connections efficiently
-- **Archiving** — move old data to cold storage (S3 / Glacier) automatically
-- **Data warehouse** — move aggregated metrics to Redshift or BigQuery for 
-  fast analytical queries across billions of rows
-
----
-
-### 5. Containerization and Orchestration
-
-For deploying and managing the pipeline at scale:
-
-- **Docker** — containerize each pipeline component so it runs consistently 
-  anywhere
-- **Kubernetes** — orchestrate containers, auto-scale based on load, and 
-  restart failed components automatically
-- **Helm charts** — manage Kubernetes deployments for the pipeline
-
----
-
-### 6. Monitoring and Observability
-
-At scale, observability becomes critical:
-
-- **Prometheus + Grafana** — monitor pipeline throughput, error rates, 
-  and DB performance in real time
-- **ELK Stack** (Elasticsearch, Logstash, Kibana) — centralized log 
-  aggregation and searching across all pipeline nodes
-- **PagerDuty / Alerting** — automated alerts when error rates spike or 
-  pipeline lag increases
-
----
-
-## Summary
-
-| Component | Current | At Scale |
-|---|---|---|
-| Ingestion | Folder watcher | Apache Kafka / AWS Kinesis |
-| Processing | Single-threaded pandas | Apache Spark / AWS Lambda |
-| Storage | Single PostgreSQL | PostgreSQL + Redshift |
-| Deployment | Local Python script | Docker + Kubernetes |
-| Monitoring | Log files | Prometheus + Grafana + ELK |
-| Fault Tolerance | Try/except + retries | Kafka retention + Spark recovery |
-
-The current pipeline is built with clean separation of concerns — each component 
-(watcher, validator, transformer, aggregator, db handler) is independent. This 
-makes it straightforward to swap out individual components for their scaled 
-equivalents without rewriting the entire pipeline.
+- Batch inserts instead of row by row (already doing this with execute_values)
+- Compress CSV files before storing to reduce I/O
+- Index the most queried columns (already done in schema)
+- Cache aggregated results that are queried frequently
